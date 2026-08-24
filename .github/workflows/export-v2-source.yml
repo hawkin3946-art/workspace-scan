@@ -1,0 +1,29 @@
+name: Export v2 source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/export-v2-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate source completeness
+        run: |
+          test -s workspace_scan_2/index.html
+          grep -q '</body>' workspace_scan_2/index.html
+          grep -q '</html>' workspace_scan_2/index.html
+          grep -q 'id="welcomeScreen"' workspace_scan_2/index.html
+          wc -c workspace_scan_2/index.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v2-source
+          path: workspace_scan_2/index.html
+          if-no-files-found: error
+          retention-days: 1
