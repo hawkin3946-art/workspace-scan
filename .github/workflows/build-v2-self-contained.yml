@@ -1,0 +1,194 @@
+name: Build self-contained Workspace Scan v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-v2-self-contained.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin workspace_scan_2:workspace_scan_2
+
+      - name: Vendor browser AI runtime and model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p workspace_scan_2/vendor/model
+          curl -fL --retry 3 --connect-timeout 15 -o workspace_scan_2/vendor/tf.min.js https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js
+          curl -fL --retry 3 --connect-timeout 15 -o workspace_scan_2/vendor/coco-ssd.min.js https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js
+          curl -fL --retry 3 --connect-timeout 15 -o workspace_scan_2/vendor/jszip.min.js https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+          curl -fL --retry 3 --connect-timeout 15 -o workspace_scan_2/vendor/model/model.json https://storage.googleapis.com/tfjs-models/savedmodel/ssdlite_mobilenet_v2/model.json
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('workspace_scan_2/vendor/model')
+          model = json.loads((root/'model.json').read_text())
+          base = 'https://storage.googleapis.com/tfjs-models/savedmodel/ssdlite_mobilenet_v2/'
+          paths=[]
+          for group in model.get('weightsManifest', []):
+              paths.extend(group.get('paths', []))
+          for rel in sorted(set(paths)):
+              dest = root/rel
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              subprocess.run(['curl','-fL','--retry','3','--connect-timeout','15','-o',str(dest),base+rel], check=True)
+          print('model shards:', len(set(paths)))
+          PY
+
+      - name: Patch complete v2 source safely
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('workspace_scan_2/index.html')
+          s=p.read_text()
+          for tag in [
+            '<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>\n',
+            '<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>\n',
+            '<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>\n',
+            '<script async src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>\n',
+            '<script async src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>\n',
+            '<script async src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>\n'
+          ]:
+              s=s.replace(tag,'')
+          anchor='  const seenObjects = new Map();\n'
+          block=r'''  const scriptLoads = new Map();
+          const LIBRARY_URLS = {
+            tf: [
+              './vendor/tf.min.js',
+              'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+              'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
+            ],
+            coco: [
+              './vendor/coco-ssd.min.js',
+              'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
+              'https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
+            ],
+            zip: [
+              './vendor/jszip.min.js',
+              'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+              'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'
+            ]
+          };
+
+          function loadScriptOnce(src, globalName, timeoutMs = 6500) {
+            if (globalName && window[globalName]) return Promise.resolve();
+            if (scriptLoads.has(src)) return scriptLoads.get(src);
+            const promise = new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              const timeout = setTimeout(() => {
+                script.remove();
+                reject(new Error(`Timed out loading ${src}`));
+              }, timeoutMs);
+              script.src = src;
+              script.async = true;
+              script.onload = () => {
+                clearTimeout(timeout);
+                if (!globalName || window[globalName]) resolve();
+                else reject(new Error(`${globalName} unavailable after ${src} loaded`));
+              };
+              script.onerror = () => {
+                clearTimeout(timeout);
+                script.remove();
+                reject(new Error(`Failed to load ${src}`));
+              };
+              document.head.appendChild(script);
+            }).catch(error => { scriptLoads.delete(src); throw error; });
+            scriptLoads.set(src, promise);
+            return promise;
+          }
+
+          async function loadFirstAvailable(urls, globalName) {
+            let lastError = null;
+            for (const src of urls) {
+              try {
+                await loadScriptOnce(src, globalName);
+                return;
+              } catch (error) { lastError = error; }
+            }
+            throw lastError || new Error(`Unable to load ${globalName}`);
+          }
+
+          async function ensureRecognitionLibraries() {
+            if (!window.tf) await loadFirstAvailable(LIBRARY_URLS.tf, 'tf');
+            if (!window.cocoSsd) await loadFirstAvailable(LIBRARY_URLS.coco, 'cocoSsd');
+          }
+
+          async function ensureZipLibrary() {
+            if (!window.JSZip) await loadFirstAvailable(LIBRARY_URLS.zip, 'JSZip');
+          }
+          '''
+          if 'const scriptLoads = new Map();' not in s:
+              if anchor not in s: raise SystemExit('seenObjects anchor missing')
+              s=s.replace(anchor, anchor+block, 1)
+          old="      if (!window.tf || !window.cocoSsd) throw new Error('Recognition libraries did not load.');"
+          new="      await ensureRecognitionLibraries();\n      if (sessionId !== recognitionSessionId || scanState === 'welcome') return;"
+          if old in s: s=s.replace(old,new,1)
+          s=s.replace("cocoSsd.load({ base: 'lite_mobilenet_v2' })", "cocoSsd.load({ base: 'lite_mobilenet_v2', modelUrl: './vendor/model/model.json' })")
+          oldzip="    if (!capturedFrames.length || typeof JSZip === 'undefined') return;\n    try {"
+          newzip="    if (!capturedFrames.length) return;\n    try {\n      await ensureZipLibrary();"
+          if oldzip in s: s=s.replace(oldzip,newzip,1)
+          if '<script src="https://cdn.jsdelivr.net/npm/@tensorflow' in s[:2500]: raise SystemExit('blocking TensorFlow script remains in head')
+          if '</body>' not in s or '</html>' not in s: raise SystemExit('document incomplete')
+          if 'id="welcomeScreen"' not in s or 'id="startButton"' not in s: raise SystemExit('welcome UI missing')
+          if 'ensureRecognitionLibraries' not in s or "./vendor/model/model.json" not in s: raise SystemExit('self-contained AI patch missing')
+          p.write_text(s)
+          print('patched bytes:', p.stat().st_size)
+          if p.stat().st_size < 55000: raise SystemExit('unexpectedly small HTML')
+          PY
+
+      - name: Chromium first-paint gate with external AI hosts blocked
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          test -n "$CHROME"
+          "$CHROME" --version
+          python3 -m http.server 8765 >/tmp/ws2-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID || true' EXIT
+          sleep 1
+          timeout 20s "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --host-resolver-rules='MAP cdn.jsdelivr.net 0.0.0.0, MAP unpkg.com 0.0.0.0, MAP cdnjs.cloudflare.com 0.0.0.0, MAP storage.googleapis.com 0.0.0.0' \
+            --virtual-time-budget=1500 --dump-dom http://127.0.0.1:8765/workspace_scan_2/ > /tmp/rendered-v2.html
+          grep -q 'id="welcomeScreen"' /tmp/rendered-v2.html
+          grep -q 'Start workspace scan' /tmp/rendered-v2.html
+          grep -q 'Scan your workspace with confidence' /tmp/rendered-v2.html
+          timeout 20s "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --window-size=390,844 --virtual-time-budget=1200 \
+            --screenshot=/tmp/workspace-scan-v2-first-paint.png http://127.0.0.1:8765/workspace_scan_2/
+          test -s /tmp/workspace-scan-v2-first-paint.png
+
+      - name: Publish main Pages copy
+        run: |
+          git add workspace_scan_2
+          git commit -m "Make Workspace Scan v2 self-contained and first-paint safe" || true
+          git push origin main
+
+      - name: Publish workspace_scan_2 branch from exact tested artifact
+        run: |
+          git worktree add /tmp/workspace-scan-v2 workspace_scan_2
+          rm -rf /tmp/workspace-scan-v2/vendor
+          cp workspace_scan_2/index.html /tmp/workspace-scan-v2/index.html
+          cp -R workspace_scan_2/vendor /tmp/workspace-scan-v2/vendor
+          cd /tmp/workspace-scan-v2
+          git add index.html vendor
+          git commit -m "Make v2 self-contained and first-paint safe" || true
+          git push origin workspace_scan_2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-scan-v2-first-paint
+          path: /tmp/workspace-scan-v2-first-paint.png
+          retention-days: 1
