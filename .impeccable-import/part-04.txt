@@ -1,0 +1,152 @@
+      <div class="horizon-track"></div>
+      <div class="horizon-center"></div>
+      <div id="guidePuck" data-quality="warning">
+        <svg viewBox="0 0 24 24"><path d="M5 12h12"/><path d="m13 8 4 4-4 4"/></svg>
+      </div>
+    </div>
+
+    <div id="countdown" aria-live="assertive"></div>
+    <div id="startCue"><div class="cue-icon"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v6h6"/></svg></div><strong>Rotate slowly</strong><span>Keep the guide centered as you turn.</span></div>
+  </div>
+
+  <div class="scan-topbar">
+    <button id="closeScanButton" class="icon-button" type="button" aria-label="End scan and return to instructions">
+      <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+    </button>
+    <div class="scan-title"><strong>Workspace scan</strong><span id="topProgressLabel">0 of 6 captured</span></div>
+    <button id="scanSoundButton" class="sound-button" type="button" data-enabled="false" aria-pressed="false" aria-label="Turn sound guidance on">
+      <svg viewBox="0 0 24 24"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path class="sound-wave" d="M15 9.2a4 4 0 0 1 0 5.6M17.8 6.5a7.7 7.7 0 0 1 0 11"/></svg>
+    </button>
+  </div>
+
+  <div class="scan-bottom">
+    <div id="guidanceCard" class="guidance-card" data-state="warning" aria-live="polite">
+      <div class="guidance-main">
+        <div class="guidance-symbol" aria-hidden="true"><svg id="guidanceIcon" viewBox="0 0 24 24"><path d="M5 12h12"/><path d="m13 8 4 4-4 4"/></svg></div>
+        <div class="guidance-copy"><strong id="guidanceTitle">Center the guide</strong><span id="guidanceDetail">Tilt your phone gently until the circle rests on the center line.</span></div>
+      </div>
+      <div class="scan-progress">
+        <div class="progress-meta"><span>Capture progress</span><strong id="progressPercent">0%</strong></div>
+        <div class="progress-track"><div id="progressBar"></div></div>
+        <div id="frameStrip" class="frame-strip" aria-label="Captured checkpoints"></div>
+        <a id="restartLink" class="restart-link hidden" role="button" tabindex="0">Restart scan</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div id="permissionLayer" class="modal-layer hidden" role="dialog" aria-modal="true" aria-labelledby="permissionTitle">
+  <div class="modal-card">
+    <div class="modal-icon"><svg viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4v1H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-2V7a4 4 0 0 0-4-4Z"/><path d="M10 14h4"/></svg></div>
+    <h2 id="permissionTitle">Camera and motion access</h2>
+    <p>Workspace Scan uses your rear camera and phone motion sensors to guide a steady 360° capture.</p>
+    <p id="errorText"></p>
+    <button id="permissionButton" class="primary-button" type="button">Allow access</button>
+  </div>
+</div>
+
+<div id="reviewOverlay" aria-label="Captured frame review">
+  <img id="reviewImage" alt="Captured workspace frame">
+  <div class="review-hint">Tap to close · Double-tap to zoom · Swipe for next</div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const welcomeScreen = document.getElementById('welcomeScreen');
+  const scanScreen = document.getElementById('scanScreen');
+  const startButton = document.getElementById('startButton');
+  const closeScanButton = document.getElementById('closeScanButton');
+  const welcomeSoundButton = document.getElementById('welcomeSoundButton');
+  const scanSoundButton = document.getElementById('scanSoundButton');
+  const videoFeed = document.getElementById('videoFeed');
+  const qualityWash = document.getElementById('qualityWash');
+  const statusPill = document.getElementById('statusPill');
+  const statusText = document.getElementById('statusText');
+  const guidePuck = document.getElementById('guidePuck');
+  const countdown = document.getElementById('countdown');
+  const startCue = document.getElementById('startCue');
+  const guidanceCard = document.getElementById('guidanceCard');
+  const guidanceIcon = document.getElementById('guidanceIcon');
+  const guidanceTitle = document.getElementById('guidanceTitle');
+  const guidanceDetail = document.getElementById('guidanceDetail');
+  const topProgressLabel = document.getElementById('topProgressLabel');
+  const progressPercent = document.getElementById('progressPercent');
+  const progressBar = document.getElementById('progressBar');
+  const frameStrip = document.getElementById('frameStrip');
+  const restartLink = document.getElementById('restartLink');
+  const permissionLayer = document.getElementById('permissionLayer');
+  const permissionButton = document.getElementById('permissionButton');
+  const errorText = document.getElementById('errorText');
+  const reviewOverlay = document.getElementById('reviewOverlay');
+  const reviewImage = document.getElementById('reviewImage');
+
+  const TARGET_PITCH = 80;
+  const DEGREES_PER_FRAME = 60;
+  const TOTAL_FRAMES = Math.round(360 / DEGREES_PER_FRAME);
+  const CAPTURE_WINDOW_DEGREES = 7;
+  const ALIGN_ENTER_PITCH = 3.5;
+  const ALIGN_EXIT_PITCH = 5.5;
+  const ALIGN_ENTER_ROLL = 8;
+  const ALIGN_EXIT_ROLL = 12;
+  const CAPTURE_PITCH_TOLERANCE = 7;
+  const CAPTURE_ROLL_TOLERANCE = 15;
+  const ALIGNMENT_HOLD_TIME = 650;
+  const GUIDE_SENSITIVITY = 1.12;
+  const HEADING_SMOOTHING = 0.18;
+  const ORIENTATION_SMOOTHING = 0.16;
+  const VELOCITY_SMOOTHING = 0.16;
+  const IDEAL_SPEED_MIN = 6;
+  const IDEAL_SPEED_MAX = 26;
+  const SPEED_WARNING = 34;
+  const SPEED_PAUSE = 55;
+  const SPEED_RECOVERY = 28;
+  const MAX_BEEP_INTERVAL = 1800;
+  const MIN_BEEP_INTERVAL = 320;
+
+  let scanState = 'welcome';
+  let isCountdownActive = false;
+  let isSoundEnabled = false;
+  let videoStream = null;
+  let imageCaptureController = null;
+  let capturedFrames = [];
+  let targetHeadings = [];
+  let nextHeadingIndex = 0;
+  let currentHeading = 0;
+  let lastRawHeading = null;
+  let smoothedHeading = null;
+  let startHeading = 0;
+  let smoothedPitch = TARGET_PITCH;
+  let smoothedRoll = 0;
+  let alignmentLocked = false;
+  let alignmentHoldTimer = null;
+  let isCapturing = false;
+  let qualityPaused = false;
+  let lastHeadingTimestamp = 0;
+  let previousHeading = 0;
+  let smoothedAngularVelocity = 0;
+  let recoveryStartedAt = 0;
+  let beepTimeoutId = null;
+  let currentBeepInterval = MAX_BEEP_INTERVAL;
+  let audioContext = null;
+  let reviewIndex = -1;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let tapTimer = null;
+  let isZoomed = false;
+  let lastGuidanceKey = '';
+
+  const icons = {
+    align: '<path d="M5 12h12"/><path d="m13 8 4 4-4 4"/>',
+    ready: '<path d="m5 12 4 4L19 6"/>',
+    rotate: '<path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v6h6"/>',
+    slow: '<path d="M5 12h14"/><path d="M8 8 4 12l4 4"/><path d="m16 8 4 4-4 4"/>',
+    level: '<path d="M4 12h16"/><path d="M7 8v8M17 8v8"/>',
+    complete: '<path d="m5 12 4 4L19 6"/>'
+  };
+
+  function vibrate(pattern) {
+    if (navigator.vibrate) navigator.vibrate(pattern);
+  }
+
+  function setSound(enabled) {
+    isSoundEnabled = enabled;

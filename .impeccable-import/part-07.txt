@@ -1,0 +1,183 @@
+      playBeep(980, 54, .07);
+      vibrate(16);
+    } catch (error) {
+      console.error('Capture failed', error);
+      setGuidance('capture-retry', 'warning', 'Hold steady', 'That checkpoint needs another moment. Keep moving smoothly.', 'level');
+    } finally {
+      isCapturing = false;
+    }
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function completeScan() {
+    scanState = 'complete';
+    clearTimeout(beepTimeoutId);
+    qualityPaused = false;
+    qualityWash.dataset.state = 'complete';
+    guidePuck.dataset.quality = 'ready';
+    guidePuck.classList.add('locked');
+    statusPill.dataset.state = 'complete';
+    guidanceCard.dataset.state = 'complete';
+    statusText.textContent = 'Scan complete';
+    guidanceTitle.textContent = 'Workspace captured';
+    guidanceDetail.textContent = 'All six checkpoints are ready. Your scan package is being created.';
+    guidanceIcon.innerHTML = icons.complete;
+    restartLink.classList.remove('hidden');
+    playBeep(880, 90, .10);
+    setTimeout(() => playBeep(1120, 120, .10), 130);
+    vibrate([25, 45, 35]);
+    await createZipDownload();
+  }
+
+  async function createZipDownload() {
+    if (!capturedFrames.length || typeof JSZip === 'undefined') return;
+    try {
+      const zip = new JSZip();
+      capturedFrames.forEach((dataUrl, index) => {
+        const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+        zip.file(`workspace_${String(index + 1).padStart(2, '0')}.jpeg`, base64, { base64: true });
+      });
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'workspace_scan.zip';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1200);
+    } catch (error) {
+      console.error('ZIP creation failed', error);
+      guidanceDetail.textContent = 'Capture is complete, but the download could not be created automatically.';
+    }
+  }
+
+  function showReview(index) {
+    if (!capturedFrames[index]) return;
+    reviewIndex = index;
+    reviewImage.src = capturedFrames[index];
+    reviewOverlay.classList.add('open');
+  }
+
+  function closeReview() {
+    clearTimeout(tapTimer);
+    tapTimer = null;
+    reviewOverlay.classList.remove('open');
+    reviewIndex = -1;
+    if (isZoomed) toggleZoom();
+  }
+
+  function toggleZoom() {
+    isZoomed = !isZoomed;
+    reviewImage.classList.toggle('zoomed', isZoomed);
+    reviewOverlay.style.justifyContent = isZoomed ? 'flex-start' : 'center';
+    reviewOverlay.style.alignItems = isZoomed ? 'flex-start' : 'center';
+    if (!isZoomed) { reviewOverlay.scrollTop = 0; reviewOverlay.scrollLeft = 0; }
+  }
+
+  function resetToWelcome() {
+    clearTimeout(beepTimeoutId);
+    clearTimeout(alignmentHoldTimer);
+    window.removeEventListener('deviceorientation', handleOrientation, true);
+    if (videoStream) videoStream.getTracks().forEach(track => track.stop());
+    videoStream = null;
+    imageCaptureController = null;
+    scanState = 'welcome';
+    isCountdownActive = false;
+    capturedFrames = [];
+    targetHeadings = [];
+    nextHeadingIndex = 0;
+    currentHeading = 0;
+    lastRawHeading = null;
+    smoothedHeading = null;
+    lastRawHeading = null;
+    smoothedPitch = TARGET_PITCH;
+    smoothedRoll = 0;
+    alignmentLocked = false;
+    isCapturing = false;
+    qualityPaused = false;
+    lastHeadingTimestamp = 0;
+    smoothedAngularVelocity = 0;
+    recoveryStartedAt = 0;
+    lastGuidanceKey = '';
+    countdown.style.display = 'none';
+    startCue.classList.remove('show');
+    restartLink.classList.add('hidden');
+    startButton.disabled = false;
+    startButton.querySelector('span').textContent = 'Start workspace scan';
+    scanScreen.classList.add('hidden');
+    welcomeScreen.classList.remove('hidden');
+    closeReview();
+  }
+
+  function restartScan() {
+    capturedFrames = [];
+    targetHeadings = [];
+    nextHeadingIndex = 0;
+    scanState = 'pre-scan';
+    smoothedHeading = null;
+    lastRawHeading = null;
+    smoothedPitch = TARGET_PITCH;
+    smoothedRoll = 0;
+    alignmentLocked = false;
+    smoothedAngularVelocity = 0;
+    recoveryStartedAt = 0;
+    lastHeadingTimestamp = 0;
+    qualityPaused = false;
+    lastGuidanceKey = '';
+    restartLink.classList.add('hidden');
+    initializeFrameStrip();
+    updateProgress();
+    setGuidance('restart-align', 'warning', 'Center the guide', 'Tilt your phone gently until the circle rests on the center line.', 'align');
+  }
+
+  welcomeSoundButton.addEventListener('click', toggleSound);
+  scanSoundButton.addEventListener('click', toggleSound);
+  startButton.addEventListener('click', requestPermissionsAndStart);
+  permissionButton.addEventListener('click', requestPermissionsAndStart);
+  closeScanButton.addEventListener('click', resetToWelcome);
+  restartLink.addEventListener('click', restartScan);
+  restartLink.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); restartScan(); } });
+
+  reviewOverlay.addEventListener('touchstart', e => {
+    if (!e.changedTouches[0]) return;
+    touchStartX = e.changedTouches[0].screenX;
+    touchStartY = e.changedTouches[0].screenY;
+  }, { passive: true });
+
+  reviewOverlay.addEventListener('touchend', e => {
+    if (!e.changedTouches[0]) return;
+    const dx = e.changedTouches[0].screenX - touchStartX;
+    const dy = e.changedTouches[0].screenY - touchStartY;
+    const swipe = Math.abs(dx) > 52 && Math.abs(dx) > Math.abs(dy);
+    if (isZoomed) { if (!swipe) toggleZoom(); return; }
+    if (swipe && capturedFrames.length) {
+      reviewIndex = dx < 0 ? (reviewIndex + 1) % capturedFrames.length : (reviewIndex - 1 + capturedFrames.length) % capturedFrames.length;
+      reviewImage.src = capturedFrames[reviewIndex];
+      clearTimeout(tapTimer); tapTimer = null;
+    } else if (!tapTimer) {
+      tapTimer = setTimeout(() => { tapTimer = null; closeReview(); }, 280);
+    } else {
+      clearTimeout(tapTimer); tapTimer = null; toggleZoom();
+    }
+  }, { passive: true });
+
+  reviewOverlay.addEventListener('click', e => {
+    if (e.pointerType === 'touch') return;
+    closeReview();
+  });
+
+  setSound(false);
+  initializeFrameStrip();
+});
+</script>
+</body>
+</html>

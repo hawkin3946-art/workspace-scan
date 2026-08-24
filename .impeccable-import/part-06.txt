@@ -1,0 +1,164 @@
+    if ([alpha, beta, gamma].some(v => v === null || typeof v !== 'number')) return;
+
+    const rawHeading = alpha;
+    smoothedHeading = smoothHeading(rawHeading);
+    currentHeading = smoothedHeading;
+    smoothedPitch += (beta - smoothedPitch) * ORIENTATION_SMOOTHING;
+    smoothedRoll += (gamma - smoothedRoll) * ORIENTATION_SMOOTHING;
+
+    const pitchOffset = smoothedPitch - TARGET_PITCH;
+    const pitchDeviation = Math.abs(pitchOffset);
+    const rollDeviation = Math.abs(smoothedRoll);
+    const locked = updateAlignmentLock(pitchDeviation, rollDeviation);
+
+    if (scanState === 'pre-scan') {
+      updateGuidePosition(pitchOffset, smoothedRoll, locked, 0);
+      if (locked) {
+        setGuidance('ready', 'ready', 'Hold steady', 'Perfect position. Keep still for a moment to begin.', 'ready');
+        if (!alignmentHoldTimer) alignmentHoldTimer = setTimeout(startCountdownSequence, ALIGNMENT_HOLD_TIME);
+      } else {
+        if (alignmentHoldTimer) { clearTimeout(alignmentHoldTimer); alignmentHoldTimer = null; }
+        const tip = rollDeviation > ALIGN_EXIT_ROLL ? 'Rotate your phone slightly left or right.' : (pitchOffset > 0 ? 'Tilt the top of your phone slightly toward you.' : 'Tilt the top of your phone slightly away from you.');
+        setGuidance(`align-${rollDeviation > ALIGN_EXIT_ROLL ? 'roll' : pitchOffset > 0 ? 'down' : 'up'}`, 'warning', 'Center the guide', tip, 'align');
+      }
+      lastRawHeading = rawHeading;
+      return;
+    }
+
+    let degreesRotated = (startHeading - currentHeading + 360) % 360;
+    if (nextHeadingIndex === 0 && degreesRotated > 180) degreesRotated = 0;
+    updateGuidePosition(pitchOffset, smoothedRoll, locked, degreesRotated);
+
+    const now = performance.now();
+    let rawAngularVelocity = 0;
+    if (lastHeadingTimestamp && lastRawHeading !== null) {
+      const dt = Math.max(.016, (now - lastHeadingTimestamp) / 1000);
+      const diff = normalizeHeadingDiff(rawHeading - lastRawHeading);
+      rawAngularVelocity = Math.abs(diff / dt);
+      smoothedAngularVelocity += (rawAngularVelocity - smoothedAngularVelocity) * VELOCITY_SMOOTHING;
+    }
+    lastHeadingTimestamp = now;
+    previousHeading = currentHeading;
+    lastRawHeading = rawHeading;
+
+    const velocityRatio = Math.min(1, smoothedAngularVelocity / SPEED_WARNING);
+    currentBeepInterval = MAX_BEEP_INTERVAL - (MAX_BEEP_INTERVAL - MIN_BEEP_INTERVAL) * velocityRatio;
+
+    const captureAligned = pitchDeviation <= CAPTURE_PITCH_TOLERANCE && rollDeviation <= CAPTURE_ROLL_TOLERANCE;
+    if (smoothedAngularVelocity >= SPEED_PAUSE && !qualityPaused) {
+      vibrate([30, 35, 30]);
+      qualityPaused = true;
+      recoveryStartedAt = 0;
+      setGuidance('too-fast', 'danger', 'Slow your turn', 'Capture is paused until your movement is smooth again.', 'slow');
+    }
+
+    if (qualityPaused) {
+      if (rawAngularVelocity > 0 && rawAngularVelocity <= SPEED_RECOVERY && captureAligned) {
+        if (!recoveryStartedAt) recoveryStartedAt = now;
+        if (now - recoveryStartedAt >= 450) {
+          qualityPaused = false;
+          recoveryStartedAt = 0;
+          smoothedAngularVelocity = Math.min(smoothedAngularVelocity, SPEED_RECOVERY);
+          vibrate(20);
+          setGuidance('recovered', 'ready', 'Nice recovery', 'Keep this pace and stay level.', 'rotate');
+        }
+      } else {
+        recoveryStartedAt = 0;
+      }
+    } else if (!captureAligned) {
+      setGuidance('relevel', 'warning', 'Stay level', 'Keep the guide near the center line while you rotate.', 'level');
+    } else if (!qualityPaused && smoothedAngularVelocity > SPEED_WARNING) {
+      setGuidance('speed-warning', 'warning', 'Ease your pace', 'A slightly slower turn will keep each checkpoint sharp.', 'slow');
+    } else if (!qualityPaused && smoothedAngularVelocity < IDEAL_SPEED_MIN && degreesRotated > 8) {
+      setGuidance('keep-moving', 'ready', 'Keep moving', 'Continue a smooth, steady turn in the same direction.', 'rotate');
+    } else if (!qualityPaused) {
+      setGuidance('good-scan', 'ready', 'Great pace', 'Stay level and continue your smooth rotation.', 'rotate');
+    }
+
+    if (!qualityPaused && captureAligned) maybeCaptureTarget();
+  }
+
+  function startCountdownSequence() {
+    if (isCountdownActive || scanState !== 'pre-scan') return;
+    alignmentHoldTimer = null;
+    isCountdownActive = true;
+    let count = 3;
+    countdown.style.display = 'grid';
+    countdown.textContent = count;
+    setGuidance('countdown', 'ready', 'Stay right there', 'Scanning begins in a moment.', 'ready');
+    playBeep(720, 80, .10);
+    vibrate(18);
+
+    const timer = setInterval(async () => {
+      count -= 1;
+      if (count > 0) {
+        countdown.textContent = count;
+        playBeep(720, 80, .10);
+        vibrate(18);
+      } else {
+        clearInterval(timer);
+        countdown.style.display = 'none';
+        isCountdownActive = false;
+        await beginCaptureProcess();
+      }
+    }, 850);
+  }
+
+  async function beginCaptureProcess() {
+    scanState = 'scanning';
+    startHeading = currentHeading;
+    previousHeading = currentHeading;
+    lastHeadingTimestamp = performance.now();
+    lastRawHeading = null;
+    smoothedAngularVelocity = 0;
+    recoveryStartedAt = 0;
+    qualityPaused = false;
+    targetHeadings = [];
+    nextHeadingIndex = 0;
+
+    await captureFrame();
+    for (let i = 1; i < TOTAL_FRAMES; i++) {
+      targetHeadings.push((startHeading - i * DEGREES_PER_FRAME + 360) % 360);
+    }
+
+    startCue.classList.remove('show');
+    void startCue.offsetWidth;
+    startCue.classList.add('show');
+    setGuidance('begin-turn', 'ready', 'Rotate slowly', 'Keep the guide centered as you turn.', 'rotate');
+    currentBeepInterval = MAX_BEEP_INTERVAL;
+    scheduleBeep();
+  }
+
+  async function maybeCaptureTarget() {
+    if (isCapturing || nextHeadingIndex >= targetHeadings.length || scanState !== 'scanning') return;
+    const target = targetHeadings[nextHeadingIndex];
+    const diff = normalizeHeadingDiff(target - currentHeading);
+    if (Math.abs(diff) <= CAPTURE_WINDOW_DEGREES) {
+      await captureFrame();
+      nextHeadingIndex += 1;
+      if (capturedFrames.length >= TOTAL_FRAMES) await completeScan();
+    }
+  }
+
+  async function captureFrame() {
+    if (isCapturing) return;
+    isCapturing = true;
+    try {
+      let dataUrl = null;
+      if (imageCaptureController) {
+        try {
+          const blob = await imageCaptureController.takePhoto();
+          dataUrl = await blobToDataUrl(blob);
+        } catch (error) {
+          console.warn('ImageCapture failed; using canvas fallback.', error);
+        }
+      }
+      if (!dataUrl) {
+        const canvas = document.createElement('canvas');
+        canvas.width = videoFeed.videoWidth || 1280;
+        canvas.height = videoFeed.videoHeight || 720;
+        canvas.getContext('2d').drawImage(videoFeed, 0, 0, canvas.width, canvas.height);
+        dataUrl = canvas.toDataURL('image/jpeg', .92);
+      }
+      capturedFrames.push(dataUrl);
+      updateProgress();

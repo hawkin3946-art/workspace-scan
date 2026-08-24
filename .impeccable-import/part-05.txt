@@ -1,0 +1,178 @@
+    [welcomeSoundButton, scanSoundButton].forEach(btn => {
+      btn.dataset.enabled = String(enabled);
+      btn.setAttribute('aria-pressed', String(enabled));
+      btn.setAttribute('aria-label', enabled ? 'Turn sound guidance off' : 'Turn sound guidance on');
+      const waves = btn.querySelectorAll('.sound-wave');
+      waves.forEach(w => w.style.display = enabled ? '' : 'none');
+    });
+  }
+
+  function toggleSound() {
+    setSound(!isSoundEnabled);
+    if (isSoundEnabled) playBeep(660, 70, .08);
+  }
+
+  async function ensureAudioContext() {
+    if (!audioContext) {
+      try { audioContext = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { console.warn('Web Audio unavailable', e); }
+    }
+    if (audioContext?.state === 'suspended') {
+      try { await audioContext.resume(); } catch (_) {}
+    }
+  }
+
+  function playBeep(frequency = 780, duration = 90, volume = .11) {
+    if (!audioContext || !isSoundEnabled) return;
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    oscillator.type = 'sine';
+    oscillator.frequency.value = frequency;
+    const now = audioContext.currentTime;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(volume, now + .018);
+    gain.gain.exponentialRampToValueAtTime(.001, now + duration / 1000);
+    oscillator.start(now);
+    oscillator.stop(now + duration / 1000 + .02);
+  }
+
+  function scheduleBeep() {
+    clearTimeout(beepTimeoutId);
+    if (scanState !== 'scanning' || !isSoundEnabled) return;
+    playBeep(qualityPaused ? 520 : 780, 70, .08);
+    beepTimeoutId = setTimeout(scheduleBeep, currentBeepInterval);
+  }
+
+  function setGuidance(key, state, title, detail, icon) {
+    if (key === lastGuidanceKey) return;
+    lastGuidanceKey = key;
+    statusPill.dataset.state = state;
+    qualityWash.dataset.state = state;
+    guidanceCard.dataset.state = state;
+    guidePuck.dataset.quality = state;
+    statusText.textContent = title;
+    guidanceTitle.textContent = title;
+    guidanceDetail.textContent = detail;
+    guidanceIcon.innerHTML = icons[icon] || icons.align;
+  }
+
+  function initializeFrameStrip() {
+    frameStrip.innerHTML = '';
+    for (let i = 0; i < TOTAL_FRAMES; i++) {
+      const dot = document.createElement('button');
+      dot.type = 'button';
+      dot.className = 'frame-dot';
+      dot.setAttribute('aria-label', `Checkpoint ${i + 1} not captured`);
+      dot.disabled = true;
+      frameStrip.appendChild(dot);
+    }
+  }
+
+  function updateProgress() {
+    const count = capturedFrames.length;
+    const pct = Math.round((count / TOTAL_FRAMES) * 100);
+    topProgressLabel.textContent = `${count} of ${TOTAL_FRAMES} captured`;
+    progressPercent.textContent = `${pct}%`;
+    progressBar.style.width = `${pct}%`;
+    const dots = [...frameStrip.children];
+    dots.forEach((dot, index) => {
+      if (capturedFrames[index]) {
+        dot.classList.add('captured', 'reviewable');
+        dot.style.backgroundImage = `url(${capturedFrames[index]})`;
+        dot.disabled = false;
+        dot.setAttribute('aria-label', `Review checkpoint ${index + 1}`);
+        dot.onclick = () => showReview(index);
+      }
+    });
+  }
+
+  async function requestPermissionsAndStart() {
+    startButton.disabled = true;
+    startButton.querySelector('span').textContent = 'Preparing camera…';
+    errorText.textContent = '';
+    await ensureAudioContext();
+
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const sensorPermission = await DeviceOrientationEvent.requestPermission();
+        if (sensorPermission !== 'granted') throw new Error('Motion access was not granted.');
+      }
+      await initializeCamera();
+    } catch (error) {
+      console.error(error);
+      errorText.textContent = error?.message || 'Camera or motion access could not be started.';
+      permissionLayer.classList.remove('hidden');
+      startButton.disabled = false;
+      startButton.querySelector('span').textContent = 'Start workspace scan';
+    }
+  }
+
+  async function initializeCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser does not support camera capture.');
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false
+    });
+    videoFeed.srcObject = videoStream;
+    const track = videoStream.getVideoTracks()[0];
+    if ('ImageCapture' in window) {
+      try { imageCaptureController = new ImageCapture(track); } catch (_) { imageCaptureController = null; }
+    }
+    initializeFrameStrip();
+    welcomeScreen.classList.add('hidden');
+    permissionLayer.classList.add('hidden');
+    scanScreen.classList.remove('hidden');
+    scanState = 'pre-scan';
+    setGuidance('align-start', 'warning', 'Center the guide', 'Tilt your phone gently until the circle rests on the center line.', 'align');
+    window.addEventListener('deviceorientation', handleOrientation, true);
+  }
+
+  function normalizeHeadingDiff(value) {
+    let diff = value;
+    while (diff > 180) diff -= 360;
+    while (diff < -180) diff += 360;
+    return diff;
+  }
+
+  function smoothHeading(raw) {
+    if (smoothedHeading === null) return raw;
+    const diff = normalizeHeadingDiff(raw - smoothedHeading);
+    return (smoothedHeading + diff * HEADING_SMOOTHING + 360) % 360;
+  }
+
+  function updateAlignmentLock(pitchDeviation, rollDeviation) {
+    if (alignmentLocked) {
+      if (pitchDeviation > ALIGN_EXIT_PITCH || rollDeviation > ALIGN_EXIT_ROLL) alignmentLocked = false;
+    } else if (pitchDeviation < ALIGN_ENTER_PITCH && rollDeviation < ALIGN_ENTER_ROLL) {
+      alignmentLocked = true;
+    }
+    return alignmentLocked;
+  }
+
+  function updateGuidePosition(pitchOffset, roll, locked, degreesRotated = 0) {
+    if (locked) {
+      guidePuck.classList.add('locked');
+    } else {
+      guidePuck.classList.remove('locked');
+      const vertical = Math.max(14, Math.min(86, 50 + pitchOffset * GUIDE_SENSITIVITY));
+      const rotation = Math.max(-24, Math.min(24, -roll));
+      guidePuck.style.top = `${vertical}%`;
+      guidePuck.style.transform = `translate(-50%,-50%) rotate(${rotation}deg)`;
+    }
+    if (scanState === 'scanning') {
+      guidePuck.classList.remove('locked');
+      const progress = Math.max(0, Math.min(1, degreesRotated / 360));
+      guidePuck.style.left = `${8 + progress * 84}%`;
+      if (locked) {
+        guidePuck.style.top = '50%';
+        guidePuck.style.transform = 'translate(-50%,-50%) rotate(0deg)';
+      }
+    } else if (!locked) {
+      guidePuck.style.left = '9%';
+    }
+  }
+
+  function handleOrientation(event) {
+    if (!['pre-scan', 'scanning'].includes(scanState) || isCountdownActive) return;
+    const { alpha, beta, gamma } = event;

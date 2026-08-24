@@ -1,0 +1,101 @@
+.guidance-copy span { display: block; color: var(--muted); margin-top: 3px; font-size: 12px; line-height: 1.35; }
+.scan-progress { padding: 0 15px 14px; }
+.progress-meta { display: flex; align-items: center; justify-content: space-between; color: var(--subtle); font-size: 11px; margin-bottom: 8px; }
+.progress-meta strong { color: rgba(255,255,255,.72); font-weight: 620; }
+.progress-track { height: 4px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.10); }
+#progressBar { height: 100%; width: 0%; border-radius: inherit; background: var(--accent); transition: width .28s ease; }
+.frame-strip { display: flex; gap: 6px; margin-top: 10px; min-height: 32px; }
+.frame-dot { flex: 1 1 0; min-width: 0; height: 32px; border-radius: 9px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.09); background-position: center; background-size: cover; position: relative; overflow: hidden; }
+.frame-dot.captured::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1.5px rgba(139,228,93,.78); }
+.frame-dot.reviewable { cursor: pointer; }
+.restart-link { display: inline-flex; margin-top: 10px; color: rgba(255,255,255,.72); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+
+/* ---------- Permission / review ---------- */
+.modal-layer { position: fixed; inset: 0; z-index: 100; background: rgba(3,5,8,.82); backdrop-filter: blur(18px); display: grid; place-items: center; padding: 24px; }
+.modal-card { width: min(100%, 420px); border-radius: 28px; background: #11151c; border: 1px solid var(--line); box-shadow: var(--shadow); padding: 24px; }
+.modal-icon { width: 48px; height: 48px; border-radius: 16px; display: grid; place-items: center; background: rgba(126,184,255,.10); color: var(--info); margin-bottom: 18px; }
+.modal-icon svg { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.modal-card h2 { margin: 0; font-size: 24px; line-height: 1.1; letter-spacing: -.03em; }
+.modal-card p { color: var(--muted); font-size: 14px; line-height: 1.55; }
+.modal-card .primary-button { margin-top: 18px; }
+#errorText { color: var(--warning); margin-bottom: 0; min-height: 20px; }
+#reviewOverlay { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,.96); display: none; overflow: auto; touch-action: pan-x pan-y; }
+#reviewOverlay.open { display: flex; justify-content: center; align-items: center; }
+#reviewImage { max-width: 96%; max-height: 88%; object-fit: contain; border-radius: 12px; }
+#reviewImage.zoomed { max-width: none; max-height: none; border-radius: 0; }
+.review-hint { position: fixed; bottom: max(18px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); color: rgba(255,255,255,.72); background: rgba(13,15,18,.74); border: 1px solid rgba(255,255,255,.12); border-radius: 999px; padding: 8px 12px; font-size: 11px; white-space: nowrap; backdrop-filter: blur(10px); }
+
+@media (min-width: 600px) {
+  body { background: #030406; }
+  #scanScreen { box-shadow: 0 0 0 1px rgba(255,255,255,.08), 0 30px 80px rgba(0,0,0,.7); }
+  .sound-button .sound-label { display: inline; font-size: 12px; font-weight: 620; }
+  .sound-button { padding: 0 12px; width: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+</style>
+</head>
+<body>
+
+<section id="welcomeScreen" aria-labelledby="welcomeTitle">
+  <div class="welcome-topbar">
+    <div class="brand-lockup">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="M8.5 10.2 12 8.3l3.5 1.9v3.7L12 15.8l-3.5-1.9z"/></svg>
+      </span>
+      <span>Workspace Scan</span>
+    </div>
+    <button id="welcomeSoundButton" class="sound-button" type="button" data-enabled="false" aria-pressed="false" aria-label="Turn sound guidance on">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path class="sound-wave" d="M15 9.2a4 4 0 0 1 0 5.6M17.8 6.5a7.7 7.7 0 0 1 0 11"/></svg>
+      <span class="sound-label">Sound</span>
+    </button>
+  </div>
+
+  <div class="welcome-content">
+    <div class="eyebrow">Guided room capture</div>
+    <h1 id="welcomeTitle">Scan your workspace with confidence.</h1>
+    <p class="lede">A guided 360° capture helps verify your testing space. Keep your phone upright, move slowly, and the guide will do the rest.</p>
+
+    <div class="setup-card" aria-label="Before you scan">
+      <div class="setup-step">
+        <span class="step-icon"><svg viewBox="0 0 24 24"><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/><circle cx="12" cy="12" r="4"/></svg></span>
+        <div class="step-copy"><strong>Use a well-lit room</strong><span>Give the camera a clear view of your space.</span></div>
+        <span class="step-number">01</span>
+      </div>
+      <div class="setup-step">
+        <span class="step-icon"><svg viewBox="0 0 24 24"><path d="M8 21h8M12 17v4"/><rect x="5" y="3" width="14" height="14" rx="2"/><path d="M9 8h6M9 12h4"/></svg></span>
+        <div class="step-copy"><strong>Start facing your desk</strong><span>Stand near the center of the room in portrait mode.</span></div>
+        <span class="step-number">02</span>
+      </div>
+      <div class="setup-step">
+        <span class="step-icon"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v6h6"/></svg></span>
+        <div class="step-copy"><strong>Rotate slowly once</strong><span>Stay level; we’ll capture six quality checkpoints.</span></div>
+        <span class="step-number">03</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="welcome-actions">
+    <button id="startButton" class="primary-button" type="button">
+      <span>Start workspace scan</span>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+    </button>
+    <p class="privacy-note">Camera images stay on this device until the scan package is created.</p>
+  </div>
+  <span class="sr-only version-display">workspace_scan_1 version 2.0</span>
+</section>
+
+<section id="scanScreen" class="hidden" aria-label="Workspace scan camera">
+  <div class="scan-stage">
+    <video id="videoFeed" autoplay playsinline muted></video>
+    <div class="video-vignette"></div>
+    <div id="qualityWash" class="quality-wash" data-state="neutral"></div>
+
+    <div class="capture-frame" aria-hidden="true">
+      <span class="capture-corner tl"></span><span class="capture-corner tr"></span><span class="capture-corner bl"></span><span class="capture-corner br"></span>
+    </div>
+
+    <div id="statusPill" data-state="warning" role="status" aria-live="polite"><span class="status-dot"></span><span id="statusText">Find the level guide</span></div>
+
+    <div id="alignmentGuide" aria-hidden="true">
