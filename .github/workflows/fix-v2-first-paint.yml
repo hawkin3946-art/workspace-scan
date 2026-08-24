@@ -1,0 +1,235 @@
+name: Fix v2 first paint
+
+on:
+  push:
+    branches: [workspace_scan_2]
+    paths:
+      - '.github/workflows/fix-v2-first-paint.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.head_commit.message == 'Run first-paint fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: workspace_scan_2
+          fetch-depth: 0
+
+      - name: Patch v2 branch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def patch(path):
+              p = Path(path)
+              s = p.read_text()
+              for tag in [
+                  '<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>\n',
+                  '<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>\n',
+                  '<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>\n'
+              ]:
+                  s = s.replace(tag, '')
+
+              needle = '  const seenObjects = new Map();\n\n  const icons = {'
+              insert = '''  const seenObjects = new Map();
+  const scriptLoads = new Map();
+  const LIBRARY_URLS = {
+    tf: [
+      'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+      'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
+    ],
+    coco: [
+      'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
+      'https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
+    ],
+    zip: [
+      'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+      'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'
+    ]
+  };
+
+  function loadScriptOnce(src, globalName, timeoutMs = 6500) {
+    if (globalName && window[globalName]) return Promise.resolve();
+    if (scriptLoads.has(src)) return scriptLoads.get(src);
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const timeout = setTimeout(() => {
+        script.remove();
+        reject(new Error(`Timed out loading ${src}`));
+      }, timeoutMs);
+      script.src = src;
+      script.async = true;
+      script.crossOrigin = 'anonymous';
+      script.onload = () => {
+        clearTimeout(timeout);
+        if (!globalName || window[globalName]) resolve();
+        else reject(new Error(`${globalName} unavailable after ${src} loaded`));
+      };
+      script.onerror = () => {
+        clearTimeout(timeout);
+        script.remove();
+        reject(new Error(`Failed to load ${src}`));
+      };
+      document.head.appendChild(script);
+    }).catch(error => { scriptLoads.delete(src); throw error; });
+    scriptLoads.set(src, promise);
+    return promise;
+  }
+
+  async function loadFirstAvailable(urls, globalName) {
+    let lastError = null;
+    for (const src of urls) {
+      try {
+        await loadScriptOnce(src, globalName);
+        return;
+      } catch (error) { lastError = error; }
+    }
+    throw lastError || new Error(`Unable to load ${globalName}`);
+  }
+
+  async function ensureRecognitionLibraries() {
+    if (!window.tf) await loadFirstAvailable(LIBRARY_URLS.tf, 'tf');
+    if (!window.cocoSsd) await loadFirstAvailable(LIBRARY_URLS.coco, 'cocoSsd');
+  }
+
+  async function ensureZipLibrary() {
+    if (!window.JSZip) await loadFirstAvailable(LIBRARY_URLS.zip, 'JSZip');
+  }
+
+  const icons = {'''
+              if needle not in s:
+                  raise SystemExit(f'loader insertion point missing in {path}')
+              s = s.replace(needle, insert, 1)
+
+              old = '''    try {
+      if (!window.tf || !window.cocoSsd) throw new Error('Recognition libraries did not load.');
+      try {
+        if (tf.getBackend() !== 'webgl') await tf.setBackend('webgl');
+      } catch (_) {
+        try { await tf.setBackend('cpu'); } catch (_) {}
+      }
+      await tf.ready();'''
+              new = '''    try {
+      await ensureRecognitionLibraries();
+      if (sessionId !== recognitionSessionId || scanState === 'welcome') return;
+      try {
+        if (tf.getBackend() !== 'webgl') await tf.setBackend('webgl');
+      } catch (_) {
+        try { await tf.setBackend('cpu'); } catch (_) {}
+      }
+      await tf.ready();'''
+              if old not in s:
+                  raise SystemExit(f'recognition insertion point missing in {path}')
+              s = s.replace(old, new, 1)
+
+              old = '''  async function createZipDownload() {
+    if (!capturedFrames.length || typeof JSZip === 'undefined') return;
+    try {
+      const zip = new JSZip();'''
+              new = '''  async function createZipDownload() {
+    if (!capturedFrames.length) return;
+    try {
+      await ensureZipLibrary();
+      const zip = new JSZip();'''
+              if old not in s:
+                  raise SystemExit(f'ZIP insertion point missing in {path}')
+              s = s.replace(old, new, 1)
+
+              if '<script src=' in s[:1200]:
+                  raise SystemExit(f'blocking head script remains in {path}')
+              p.write_text(s)
+
+          patch('index.html')
+          PY
+
+          rm .github/workflows/fix-v2-first-paint.yml
+          git config user.name "hawkin3946-art"
+          git config user.email "hawkin3946@gmail.com"
+          git add -A
+          git commit -m "Fix v2 black screen with non-blocking AI loading"
+          git push origin HEAD:workspace_scan_2
+
+      - name: Patch published v2 Pages copy
+        shell: bash
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('workspace_scan_2/index.html')
+          s = p.read_text()
+          for tag in [
+              '<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>\n',
+              '<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>\n',
+              '<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>\n'
+          ]:
+              s = s.replace(tag, '')
+          needle = '  const seenObjects = new Map();\n\n  const icons = {'
+          insert = '''  const seenObjects = new Map();
+  const scriptLoads = new Map();
+  const LIBRARY_URLS = {
+    tf: ['https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js','https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js'],
+    coco: ['https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js','https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'],
+    zip: ['https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js','https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js']
+  };
+  function loadScriptOnce(src, globalName, timeoutMs = 6500) {
+    if (globalName && window[globalName]) return Promise.resolve();
+    if (scriptLoads.has(src)) return scriptLoads.get(src);
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const timeout = setTimeout(() => { script.remove(); reject(new Error(`Timed out loading ${src}`)); }, timeoutMs);
+      script.src = src; script.async = true; script.crossOrigin = 'anonymous';
+      script.onload = () => { clearTimeout(timeout); if (!globalName || window[globalName]) resolve(); else reject(new Error(`${globalName} unavailable`)); };
+      script.onerror = () => { clearTimeout(timeout); script.remove(); reject(new Error(`Failed to load ${src}`)); };
+      document.head.appendChild(script);
+    }).catch(error => { scriptLoads.delete(src); throw error; });
+    scriptLoads.set(src, promise); return promise;
+  }
+  async function loadFirstAvailable(urls, globalName) { let lastError=null; for (const src of urls) { try { await loadScriptOnce(src, globalName); return; } catch (e) { lastError=e; } } throw lastError || new Error(`Unable to load ${globalName}`); }
+  async function ensureRecognitionLibraries() { if (!window.tf) await loadFirstAvailable(LIBRARY_URLS.tf,'tf'); if (!window.cocoSsd) await loadFirstAvailable(LIBRARY_URLS.coco,'cocoSsd'); }
+  async function ensureZipLibrary() { if (!window.JSZip) await loadFirstAvailable(LIBRARY_URLS.zip,'JSZip'); }
+
+  const icons = {'''
+          if needle not in s: raise SystemExit('loader insertion point missing')
+          s=s.replace(needle,insert,1)
+          old="""    try {
+      if (!window.tf || !window.cocoSsd) throw new Error('Recognition libraries did not load.');
+      try {
+        if (tf.getBackend() !== 'webgl') await tf.setBackend('webgl');
+      } catch (_) {
+        try { await tf.setBackend('cpu'); } catch (_) {}
+      }
+      await tf.ready();"""
+          new="""    try {
+      await ensureRecognitionLibraries();
+      if (sessionId !== recognitionSessionId || scanState === 'welcome') return;
+      try {
+        if (tf.getBackend() !== 'webgl') await tf.setBackend('webgl');
+      } catch (_) {
+        try { await tf.setBackend('cpu'); } catch (_) {}
+      }
+      await tf.ready();"""
+          if old not in s: raise SystemExit('recognition insertion point missing')
+          s=s.replace(old,new,1)
+          old="""  async function createZipDownload() {
+    if (!capturedFrames.length || typeof JSZip === 'undefined') return;
+    try {
+      const zip = new JSZip();"""
+          new="""  async function createZipDownload() {
+    if (!capturedFrames.length) return;
+    try {
+      await ensureZipLibrary();
+      const zip = new JSZip();"""
+          if old not in s: raise SystemExit('ZIP insertion point missing')
+          s=s.replace(old,new,1)
+          if '<script src=' in s[:1200]: raise SystemExit('blocking head script remains')
+          p.write_text(s)
+          PY
+          git add workspace_scan_2/index.html
+          git commit -m "Publish v2 first-paint black-screen fix"
+          git push origin HEAD:main
