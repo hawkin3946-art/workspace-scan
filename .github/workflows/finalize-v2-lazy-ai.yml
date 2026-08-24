@@ -1,0 +1,167 @@
+name: Finalize v2 lazy AI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/finalize-v2-lazy-ai.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.head_commit.message == 'Run v2 lazy-AI finalization'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build patcher
+        shell: bash
+        run: |
+          cat >/tmp/patch_v2.py <<'PY'
+          import sys
+          from pathlib import Path
+
+          p=Path(sys.argv[1])
+          s=p.read_text()
+          urls=[
+            'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+            'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+            'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
+          ]
+          for url in urls:
+            s=s.replace(f'<script src="{url}"></script>\n','')
+            s=s.replace(f'<script async src="{url}"></script>\n','')
+
+          needle='  const seenObjects = new Map();\n\n  const icons = {'
+          insert='''  const seenObjects = new Map();
+  const scriptLoads = new Map();
+  const LIBRARY_URLS = {
+    tf: [
+      'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+      'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
+    ],
+    coco: [
+      'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
+      'https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
+    ],
+    zip: [
+      'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+      'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'
+    ]
+  };
+
+  function loadScriptOnce(src, globalName, timeoutMs = 6500) {
+    if (globalName && window[globalName]) return Promise.resolve();
+    if (scriptLoads.has(src)) return scriptLoads.get(src);
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const timeout = setTimeout(() => {
+        script.remove();
+        reject(new Error(`Timed out loading ${src}`));
+      }, timeoutMs);
+      script.src = src;
+      script.async = true;
+      script.crossOrigin = 'anonymous';
+      script.onload = () => {
+        clearTimeout(timeout);
+        if (!globalName || window[globalName]) resolve();
+        else reject(new Error(`${globalName} unavailable after ${src} loaded`));
+      };
+      script.onerror = () => {
+        clearTimeout(timeout);
+        script.remove();
+        reject(new Error(`Failed to load ${src}`));
+      };
+      document.head.appendChild(script);
+    }).catch(error => { scriptLoads.delete(src); throw error; });
+    scriptLoads.set(src, promise);
+    return promise;
+  }
+
+  async function loadFirstAvailable(urls, globalName) {
+    let lastError = null;
+    for (const src of urls) {
+      try {
+        await loadScriptOnce(src, globalName);
+        return;
+      } catch (error) { lastError = error; }
+    }
+    throw lastError || new Error(`Unable to load ${globalName}`);
+  }
+
+  async function ensureRecognitionLibraries() {
+    if (!window.tf) await loadFirstAvailable(LIBRARY_URLS.tf, 'tf');
+    if (!window.cocoSsd) await loadFirstAvailable(LIBRARY_URLS.coco, 'cocoSsd');
+  }
+
+  async function ensureZipLibrary() {
+    if (!window.JSZip) await loadFirstAvailable(LIBRARY_URLS.zip, 'JSZip');
+  }
+
+  const icons = {'''
+          if needle not in s:
+            raise SystemExit(f'loader insertion point missing in {p}')
+          s=s.replace(needle,insert,1)
+
+          old='''    try {
+      if (!window.tf || !window.cocoSsd) throw new Error('Recognition libraries did not load.');
+      try {
+        if (tf.getBackend() !== 'webgl') await tf.setBackend('webgl');
+      } catch (_) {
+        try { await tf.setBackend('cpu'); } catch (_) {}
+      }
+      await tf.ready();'''
+          new='''    try {
+      await ensureRecognitionLibraries();
+      if (sessionId !== recognitionSessionId || scanState === 'welcome') return;
+      try {
+        if (tf.getBackend() !== 'webgl') await tf.setBackend('webgl');
+      } catch (_) {
+        try { await tf.setBackend('cpu'); } catch (_) {}
+      }
+      await tf.ready();'''
+          if old not in s:
+            raise SystemExit(f'recognition insertion point missing in {p}')
+          s=s.replace(old,new,1)
+
+          old='''  async function createZipDownload() {
+    if (!capturedFrames.length || typeof JSZip === 'undefined') return;
+    try {
+      const zip = new JSZip();'''
+          new='''  async function createZipDownload() {
+    if (!capturedFrames.length) return;
+    try {
+      await ensureZipLibrary();
+      const zip = new JSZip();'''
+          if old not in s:
+            raise SystemExit(f'ZIP insertion point missing in {p}')
+          s=s.replace(old,new,1)
+
+          if '<script src=' in s[:1300] or '<script async src=' in s[:1300]:
+            raise SystemExit(f'blocking/eager external script remains in {p}')
+          p.write_text(s)
+          PY
+
+      - name: Patch v2 branch and published copy
+        shell: bash
+        run: |
+          git config user.name "hawkin3946-art"
+          git config user.email "hawkin3946@gmail.com"
+          git fetch origin main workspace_scan_2
+
+          git switch -C workspace_scan_2 origin/workspace_scan_2
+          python /tmp/patch_v2.py index.html
+          git add index.html
+          git commit -m "Harden v2 first paint and lazy-load object recognition"
+          git push origin HEAD:workspace_scan_2
+
+          git switch -C main origin/main
+          python /tmp/patch_v2.py workspace_scan_2/index.html
+          git rm -f .github/workflows/finalize-v2-lazy-ai.yml
+          git add workspace_scan_2/index.html
+          git commit -m "Publish hardened v2 object-recognition build"
+          git push origin HEAD:main
